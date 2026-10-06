@@ -32,18 +32,36 @@ async function writeOpencodeConfig(): Promise<void> {
   await mkdir(cfgDir, { recursive: true })
   const config = {
     $schema: "https://opencode.ai/config.json",
-    plugin: [pathToFileURL(REPO_DIR).href],
+    plugins: [pathToFileURL(REPO_DIR).href],
+    agents: {
+      "imagegen-e2e": {
+        mode: "primary",
+        system: "Use gpt_imagegen for the requested image. Do not use other tools.",
+        steps: 3,
+        permissions: [
+          { action: "*", resource: "*", effect: "deny" },
+          { action: "execute", resource: "*", effect: "allow" },
+          { action: "gpt_imagegen", resource: "*", effect: "allow" },
+        ],
+      },
+    },
   }
   await writeFile(path.join(cfgDir, "opencode.jsonc"), JSON.stringify(config, null, 2))
 }
 
 async function runOpencode(prompt: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const args = ["run", prompt, "--dir", WORKDIR, "--dangerously-skip-permissions"]
+    const args = ["run", "--standalone", "--agent", "imagegen-e2e", prompt]
     if (process.env.OPENCODE_MODEL) args.push("--model", process.env.OPENCODE_MODEL)
-    const proc = spawn("opencode", args, {
+    const proc = spawn(process.env.OPENCODE_BINARY ?? "opencode", args, {
+      cwd: WORKDIR,
       stdio: "inherit",
-      env: { ...process.env, XDG_CONFIG_HOME },
+      env: {
+        ...process.env,
+        PWD: WORKDIR,
+        XDG_CONFIG_HOME,
+        OPENCODE_CONFIG_DIR: path.join(XDG_CONFIG_HOME, "opencode"),
+      },
     })
     const timer = setTimeout(() => {
       proc.kill("SIGTERM")

@@ -1,5 +1,4 @@
-// Minimal subset of OpenCode auth.json's openai OAuth entry required by this plugin.
-export type OpenAIAuth = { type: "oauth"; access: string; accountId?: string }
+export type ImageAuth = { type: "oauth"; access: string; accountId?: string } | { type: "key"; key: string }
 
 export type GenerateArgs = {
   prompt: string

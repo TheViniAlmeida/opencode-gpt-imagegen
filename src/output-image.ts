@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 
@@ -37,18 +38,49 @@ export function buildSavedMessage(savedPath: string, requestedPath: string): str
 
 type SaveResult = { savedPath: string; versioned: boolean; message: string }
 
-// Resolve the output path (relative to ctxDir unless absolute), then write the
-// decoded PNG. Avoiding an overwrite is best-effort: the collision check and the
-// write are not atomic, so a concurrent writer racing between them could still be
-// clobbered. Returns the user-facing message alongside the saved path.
-export async function saveGeneratedImage(out: string, ctxDir: string, base64: string): Promise<SaveResult> {
+// Write a private file before publishing it through a no-overwrite hard link.
+// The writer is injectable so tests can simulate a partial disk write.
+export async function saveGeneratedImage(
+  out: string,
+  ctxDir: string,
+  base64: string,
+  signal?: AbortSignal,
+  writeTempFile: (handle: fs.FileHandle, data: Buffer) => Promise<void> = (handle, data) => handle.writeFile(data),
+  publishFile: (temporary: string, destination: string) => Promise<void> = fs.link,
+): Promise<SaveResult> {
+  signal?.throwIfAborted()
   const requestedPath = path.isAbsolute(out) ? out : path.resolve(ctxDir, out)
   await fs.mkdir(path.dirname(requestedPath), { recursive: true })
-  const savedPath = await pickNonOverwritePath(requestedPath)
-  await fs.writeFile(savedPath, Buffer.from(base64, "base64"))
-  return {
-    savedPath,
-    versioned: savedPath !== requestedPath,
-    message: buildSavedMessage(savedPath, requestedPath),
+  signal?.throwIfAborted()
+  const ext = path.extname(requestedPath)
+  const stem = requestedPath.slice(0, -ext.length || undefined)
+  const tempPath = path.join(path.dirname(requestedPath), `.${path.basename(requestedPath)}.${randomUUID()}.tmp`)
+  const handle = await fs.open(tempPath, "wx", 0o600)
+  try {
+    await writeTempFile(handle, Buffer.from(base64, "base64"))
+    await handle.close()
+    for (let version = 1; version <= MAX_OUTPUT_VERSION_SUFFIX; version++) {
+      signal?.throwIfAborted()
+      const savedPath = version === 1 ? requestedPath : `${stem}-v${version}${ext}`
+      try {
+        // The hard link is the commit point. Never remove a published path after
+        // awaiting I/O: another writer may already have replaced that entry.
+        await publishFile(tempPath, savedPath)
+        return {
+          savedPath,
+          versioned: savedPath !== requestedPath,
+          message: buildSavedMessage(savedPath, requestedPath),
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      }
+    }
+    throw new Error(`could not find a non-conflicting filename for ${requestedPath}`)
+  } finally {
+    try {
+      await handle.close()
+    } finally {
+      await fs.unlink(tempPath)
+    }
   }
 }
