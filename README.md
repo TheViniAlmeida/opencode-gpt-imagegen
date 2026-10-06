@@ -6,13 +6,13 @@
 
 [![OpenCode plugin](https://img.shields.io/badge/OpenCode-plugin-blue.svg)](https://opencode.ai/docs/plugins/)
 [![npm version](https://img.shields.io/npm/v/opencode-gpt-imagegen.svg)](https://www.npmjs.com/package/opencode-gpt-imagegen)
-[![CI](https://github.com/yuji-hatakeyama/opencode-gpt-imagegen/actions/workflows/ci.yml/badge.svg)](https://github.com/yuji-hatakeyama/opencode-gpt-imagegen/actions/workflows/ci.yml)
+[![CI](https://github.com/TheViniAlmeida/opencode-gpt-imagegen/actions/workflows/ci.yml/badge.svg)](https://github.com/TheViniAlmeida/opencode-gpt-imagegen/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 | Auth path | Status | Billing |
 |---|---|---|
-| **ChatGPT subscription** (OAuth) | **Available now in v0.1.0** | **No extra cost** — comes out of your existing Plus / Pro / Business plan |
-| **OpenAI API key** | **Coming soon in v0.2.0** | Pay-per-image against your API credits, with `generate` + `edit` support |
+| **ChatGPT subscription** (OAuth) | Supported | Uses the active OpenCode OpenAI connection and Codex backend |
+| **OpenAI API key** | Supported | Uses the active OpenCode OpenAI connection and the paid Images API |
 
 ## Highlights
 
@@ -30,7 +30,7 @@ Add this plugin to your [OpenCode config](https://opencode.ai/docs/plugins/). Fo
 }
 ```
 
-OpenCode auto-installs the package via Bun on next launch — no separate `npm install` step is needed. The plugin requires OpenCode to be authenticated with ChatGPT.
+OpenCode auto-installs the package via Bun on next launch. Connect OpenAI in OpenCode with either ChatGPT OAuth or an API key before calling the tool. This version targets OpenCode 2.0.22.
 
 ## Usage
 
@@ -67,15 +67,19 @@ Pass any number of image paths via the `images` argument and the model uses them
 | Version | Auth path | Scope | Status |
 |---|---|---|---|
 | **v0.1.0** | ChatGPT subscription | `gpt_imagegen` with optional reference images (generation + reference-guided edits via prompting) | **Released** |
-| **v0.2.0** | OpenAI API key | Adds the API-key billing path: both `generate` (`/v1/images/generations`) and `edit` (`/v1/images/edits`) with reference images | Next |
+| **V2 migration** | OpenAI API key | `generate` (`/v1/images/generations`) and `edit` (`/v1/images/edits`) with reference images | Implemented; authenticated test pending |
 | **v0.3.0** | OpenAI API key | Adds **pixel-precise mask inpainting** via `/v1/images/edits` (binary PNG alpha mask) | Planned |
 
 ## How it works
 
-OpenCode already talks to the OpenAI Codex backend to power ChatGPT subscription chat. This plugin reuses that same endpoint, attaching the hosted `image_generation` tool to a single-turn request, then writes the returned PNG to disk. Auth is read from OpenCode's standard `auth.json`; no new credential surface is introduced.
+The plugin resolves OpenCode's active OpenAI connection at call time. For ChatGPT OAuth it uses the Codex responses endpoint with the hosted `image_generation` tool. For an API key it uses OpenAI's Images API with `gpt-image-2`, sending reference images to the edit endpoint. Both paths write one PNG without overwriting an existing file.
 
 ## Disclaimer
 
 This is an **unofficial, third-party** plugin, not affiliated with or endorsed by OpenAI or OpenCode.
 
 It uses the same Codex backend endpoint OpenCode itself calls for ChatGPT subscription chat — this plugin just adds the hosted `image_generation` tool to that conversation. Use must comply with OpenAI's [Terms of Use](https://openai.com/policies/row-terms-of-use/) and [Usage Policies](https://openai.com/policies/usage-policies/).
+
+Cancellation aborts the network request and is checked before image publication.
+Once a complete PNG has been linked into place, it is retained: cancellation
+cannot remove that path because another writer may have replaced it.

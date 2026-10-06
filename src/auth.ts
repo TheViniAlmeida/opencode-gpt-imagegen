@@ -1,30 +1,31 @@
-import * as fs from "node:fs/promises"
-import * as path from "node:path"
-import { xdgData } from "xdg-basedir"
-import type { OpenAIAuth } from "./types"
+import type { Plugin } from "@opencode/plugin"
+import type { ImageAuth } from "./types"
 
-// Mirrors OpenCode's auth resolution: OPENCODE_AUTH_CONTENT overrides $XDG_DATA_HOME/opencode/auth.json.
-// The Auth service is not exposed to external plugins, so this reproduces the rules directly.
-async function loadAuthData(): Promise<Record<string, unknown>> {
-  if (process.env.OPENCODE_AUTH_CONTENT) {
-    return JSON.parse(process.env.OPENCODE_AUTH_CONTENT) as Record<string, unknown>
-  }
-  if (!xdgData) {
-    throw new Error("could not determine XDG data directory")
-  }
-  const raw = await fs.readFile(path.join(xdgData, "opencode", "auth.json"), "utf-8")
-  return JSON.parse(raw) as Record<string, unknown>
-}
+type Integration = Pick<Plugin.Context, "integration">
 
-export async function loadOpenAIAuth(): Promise<OpenAIAuth | undefined> {
+function accountID(access: string, metadata: Readonly<Record<string, unknown>> | undefined): string | undefined {
+  const metadataID = metadata?.accountID
+  if (typeof metadataID === "string" && metadataID) return metadataID
+
   try {
-    const data = await loadAuthData()
-    const entry = data.openai as Partial<OpenAIAuth> | undefined
-    if (entry?.type === "oauth" && typeof entry.access === "string") {
-      return entry as OpenAIAuth
-    }
+    const payload = access.split(".")[1]
+    if (!payload) return undefined
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>
+    const auth = claims["https://api.openai.com/auth"]
+    if (!auth || typeof auth !== "object") return undefined
+    const id = (auth as Record<string, unknown>).chatgpt_account_id
+    return typeof id === "string" && id ? id : undefined
   } catch {
     return undefined
   }
-  return undefined
+}
+
+export async function resolveOpenAIAuth(ctx: Integration): Promise<ImageAuth> {
+  const connection = await ctx.integration.connection.active("openai")
+  const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
+  if (credential?.type === "key" && credential.key) return { type: "key", key: credential.key }
+  if (credential?.type === "oauth" && credential.access) {
+    return { type: "oauth", access: credential.access, accountId: accountID(credential.access, credential.metadata) }
+  }
+  throw new Error("OpenAI connection is not configured. Connect OpenAI in OpenCode first.")
 }

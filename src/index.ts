@@ -1,68 +1,66 @@
-import type { Hooks, Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin"
-import { tool } from "@opencode-ai/plugin"
-import { loadOpenAIAuth } from "./auth"
+import { Plugin } from "@opencode/plugin"
+import { callViaOpenAI } from "./api"
+import { resolveOpenAIAuth } from "./auth"
 import { callViaCodexResponses } from "./codex"
 import { readReferenceImages } from "./input-image"
 import { saveGeneratedImage } from "./output-image"
+import type { GenerateArgs } from "./types"
 
-const GptImagePlugin: Plugin = async (_input: PluginInput): Promise<Hooks> => {
-  return {
-    tool: {
-      gpt_imagegen: tool({
-        description: [
-          "Generate raster images using OpenAI's hosted image_generation tool.",
-          "Use for AI-created bitmap visuals such as photos, illustrations, textures, sprites, and mockups.",
-          "Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas.",
-          "Reference images may be attached through `images`; label each image's role inline in `prompt`, for example: 'Image 1: reference image'.",
-          "For many distinct assets, invoke gpt_imagegen once per requested asset rather than relying on multi-image output; gpt_imagegen returns one image per call.",
-          "Requires OpenCode to be authenticated with ChatGPT OAuth. Returns the absolute path of the saved PNG.",
-        ].join(" "),
-        // https://developers.openai.com/api/docs/guides/image-generation
-        args: {
-          prompt: tool.schema.string().describe("Description of the image to generate."),
-          out: tool.schema
-            .string()
-            .describe("Output file path, relative to the project directory unless absolute. The plugin writes a PNG."),
-          quality: tool.schema
-            .enum(["low", "medium", "high", "auto"])
-            .describe("Generation quality passed to the hosted image_generation tool."),
-          size: tool.schema
-            .string()
-            .optional()
-            .describe(
-              "Optional image size passed to the hosted image_generation tool. Use `auto` or `WIDTHxHEIGHT`; width and height must be multiples of 16px, max edge <= 3840px, long-to-short ratio <= 3:1, and total pixels between 655,360 and 8,294,400.",
-            ),
-          images: tool.schema
-            .array(tool.schema.string())
-            .optional()
-            .describe("Optional reference image paths, relative to the project directory unless absolute."),
-        },
-        async execute(args, ctx) {
-          const auth = await loadOpenAIAuth()
-          if (!auth) {
-            throw new Error("OpenAI ChatGPT OAuth credentials not configured.")
-          }
-
-          const inputImageDataUrls = await readReferenceImages(args.images, ctx.directory)
-          const base64 = await callViaCodexResponses(auth, args, inputImageDataUrls)
-
-          const { savedPath, versioned, message } = await saveGeneratedImage(args.out, ctx.directory, base64)
-
-          return {
-            output: message,
-            metadata: {
-              out: savedPath,
-              versioned,
-              billing: "subscription",
-            },
-          }
-        },
-      }),
+const input = {
+  type: "object",
+  additionalProperties: false,
+  required: ["prompt", "out", "quality"],
+  properties: {
+    prompt: { type: "string", description: "Description of the image to generate." },
+    out: { type: "string", description: "Output PNG path, relative to the project directory unless absolute." },
+    quality: { type: "string", enum: ["low", "medium", "high", "auto"], description: "Image quality." },
+    size: {
+      type: "string",
+      description:
+        "Optional image size: `auto` or `WIDTHxHEIGHT`; dimensions must be multiples of 16px, max edge 3840px, ratio at most 3:1, and 655,360 to 8,294,400 total pixels.",
     },
-  }
-}
+    images: { type: "array", items: { type: "string" }, description: "Optional reference image paths." },
+  },
+} as const
 
-export default {
+export default Plugin.define({
   id: "opencode-gpt-imagegen",
-  server: GptImagePlugin,
-} satisfies PluginModule
+  async setup(ctx) {
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "gpt_imagegen",
+        description: [
+          "Generate raster images using OpenAI gpt-image-2 with the active OpenAI connection.",
+          "Use for photos, illustrations, textures, sprites, and mockups.",
+          "Reference images may be attached through `images`; label each image's role inline in `prompt`.",
+          "For distinct assets, invoke gpt_imagegen once per asset. Returns one PNG per call.",
+          "Returns the absolute saved path and never overwrites an existing file.",
+        ].join(" "),
+        input,
+        async execute(raw, context) {
+          const args = raw as GenerateArgs
+          context.signal.throwIfAborted()
+          const auth = await resolveOpenAIAuth(ctx)
+          context.signal.throwIfAborted()
+          const images = await readReferenceImages(args.images, ctx.location.directory)
+          context.signal.throwIfAborted()
+          const base64 =
+            auth.type === "oauth"
+              ? await callViaCodexResponses(auth, args, images, context.signal)
+              : await callViaOpenAI(auth.key, args, images, context.signal)
+          context.signal.throwIfAborted()
+          const { savedPath, versioned, message } = await saveGeneratedImage(
+            args.out,
+            ctx.location.directory,
+            base64,
+            context.signal,
+          )
+          return {
+            content: message,
+            metadata: { out: savedPath, versioned, billing: auth.type === "oauth" ? "subscription" : "api" },
+          }
+        },
+      })
+    })
+  },
+})

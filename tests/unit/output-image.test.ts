@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { link, mkdtemp, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { buildSavedMessage, pickNonOverwritePath, saveGeneratedImage } from "../../src/output-image"
@@ -111,5 +111,83 @@ describe("saveGeneratedImage", () => {
     )
     // The original file is left untouched.
     expect(existsSync(first.savedPath)).toBe(true)
+  })
+
+  test("concurrent saves select different paths without replacing either image", async () => {
+    const [first, second] = await Promise.all([
+      saveGeneratedImage("image.png", dir, PNG_BASE64),
+      saveGeneratedImage("image.png", dir, PNG_BASE64),
+    ])
+    expect(new Set([first.savedPath, second.savedPath])).toEqual(
+      new Set([path.join(dir, "image.png"), path.join(dir, "image-v2.png")]),
+    )
+    expect(await readFile(first.savedPath)).toEqual(PNG_BUFFER)
+    expect(await readFile(second.savedPath)).toEqual(PNG_BUFFER)
+  })
+
+  test("removes a partial temporary file after a write failure", async () => {
+    await expect(
+      saveGeneratedImage("image.png", dir, PNG_BASE64, undefined, async (handle, data) => {
+        await handle.writeFile(data.subarray(0, 4))
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" })
+      }),
+    ).rejects.toMatchObject({ code: "ENOSPC" })
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  test("keeps an existing output when writing the temporary file fails", async () => {
+    const original = path.join(dir, "image.png")
+    await occupy(original)
+    await expect(
+      saveGeneratedImage("image.png", dir, PNG_BASE64, undefined, async (handle, data) => {
+        await handle.writeFile(data.subarray(0, 4))
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" })
+      }),
+    ).rejects.toMatchObject({ code: "ENOSPC" })
+    expect(await readdir(dir)).toEqual(["image.png"])
+    expect(await readFile(original)).toEqual(PNG_BUFFER)
+  })
+
+  test("does not publish an image cancelled while writing the temporary file", async () => {
+    const controller = new AbortController()
+    await expect(
+      saveGeneratedImage("image.png", dir, PNG_BASE64, controller.signal, async (handle, data) => {
+        await handle.writeFile(data)
+        controller.abort()
+      }),
+    ).rejects.toThrow()
+    expect(await readdir(dir)).toEqual([])
+  })
+})
+
+describe("published image ownership", () => {
+  test("creates temporary and published image files with private permissions", async () => {
+    if (process.platform === "win32") return
+    let temporaryMode = 0
+    const result = await saveGeneratedImage("private.png", dir, PNG_BASE64, undefined, async (handle, data) => {
+      temporaryMode = (await handle.stat()).mode & 0o777
+      await handle.writeFile(data)
+    })
+    expect(temporaryMode).toBe(0o600)
+    expect((await stat(result.savedPath)).mode & 0o777).toBe(0o600)
+  })
+
+  test("does not delete another writer's replacement when cancellation lands after publication", async () => {
+    const controller = new AbortController()
+    const output = path.join(dir, "replaced.png")
+    await saveGeneratedImage(
+      "replaced.png",
+      dir,
+      PNG_BASE64,
+      controller.signal,
+      (handle, data) => handle.writeFile(data),
+      async (temporary, destination) => {
+        await link(temporary, destination)
+        await unlink(destination)
+        await writeFile(destination, "another writer's data")
+        controller.abort()
+      },
+    )
+    expect(await readFile(output, "utf8")).toBe("another writer's data")
   })
 })

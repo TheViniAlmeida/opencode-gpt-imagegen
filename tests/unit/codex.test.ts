@@ -69,6 +69,18 @@ describe("parseImageGenerationResultFromSSE", () => {
       "no image_generation result returned by codex backend",
     )
   })
+
+  test("stops parsing when cancelled before a result arrives", async () => {
+    const controller = new AbortController()
+    const stream = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode(dataEvent({ type: "response.created" })))
+      },
+    })
+    const parsing = parseImageGenerationResultFromSSE(stream, controller.signal)
+    controller.abort()
+    await expect(parsing).rejects.toThrow()
+  })
 })
 
 describe("callViaCodexResponses", () => {
@@ -132,12 +144,25 @@ describe("callViaCodexResponses", () => {
     expect(body.input[0].content).toEqual([{ type: "input_text", text: "a cat" }])
   })
 
-  test("throws with the status and response body when the request fails", async () => {
+  test("throws with the status but does not reveal the response body when the request fails", async () => {
     const fetchMock = mock(async (_url: string, _init: RequestInit) => new Response("upstream boom", { status: 500 }))
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const auth = { type: "oauth", access: "tok" } as const
     const args: GenerateArgs = { prompt: "a cat", out: "cat.png", quality: "auto" }
-    expect(callViaCodexResponses(auth, args, [])).rejects.toThrow("codex responses request failed: 500 upstream boom")
+    expect(callViaCodexResponses(auth, args, [])).rejects.toThrow("codex responses request failed: HTTP 500")
+  })
+
+  test("passes cancellation to the Codex request", async () => {
+    const controller = new AbortController()
+    const fetchMock = mock(async (_url: string, init: RequestInit) => {
+      expect(init.signal).toBe(controller.signal)
+      controller.abort()
+      throw controller.signal.reason
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const auth = { type: "oauth", access: "tok" } as const
+    const args: GenerateArgs = { prompt: "a cat", out: "cat.png", quality: "auto" }
+    await expect(callViaCodexResponses(auth, args, [], controller.signal)).rejects.toThrow()
   })
 })

@@ -1,5 +1,5 @@
 import { EventSourceParserStream } from "eventsource-parser/stream"
-import type { GenerateArgs, OpenAIAuth } from "./types"
+import type { GenerateArgs, ImageAuth } from "./types"
 
 // Codex OAuth responses endpoint URL.
 // https://github.com/openai/codex/blob/fca81eeb5bab4cad997622a359d446e6489c445b/codex-rs/model-provider-info/src/lib.rs#L37
@@ -15,11 +15,16 @@ type CodexSSEEvent = {
   item?: { type?: string; result?: string }
 }
 
-export async function parseImageGenerationResultFromSSE(stream: ReadableStream<Uint8Array>): Promise<string> {
+export async function parseImageGenerationResultFromSSE(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted()
   const events = (stream as unknown as ReadableStream<BufferSource>)
-    .pipeThrough(new TextDecoderStream())
-    .pipeThrough(new EventSourceParserStream())
+    .pipeThrough(new TextDecoderStream(), { signal })
+    .pipeThrough(new EventSourceParserStream(), { signal })
   for await (const event of events) {
+    signal?.throwIfAborted()
     if (event.data === "[DONE]") continue
     try {
       const json = JSON.parse(event.data) as CodexSSEEvent
@@ -36,14 +41,17 @@ export async function parseImageGenerationResultFromSSE(stream: ReadableStream<U
       // SSE keepalive or non-JSON heartbeat
     }
   }
+  signal?.throwIfAborted()
   throw new Error("no image_generation result returned by codex backend")
 }
 
 export async function callViaCodexResponses(
-  auth: OpenAIAuth,
+  auth: Extract<ImageAuth, { type: "oauth" }>,
   args: GenerateArgs,
   inputImageDataUrls: string[],
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted()
   const userContent: Array<Record<string, unknown>> = [{ type: "input_text", text: args.prompt }]
   for (const dataUrl of inputImageDataUrls) {
     userContent.push({ type: "input_image", image_url: dataUrl })
@@ -80,10 +88,10 @@ export async function callViaCodexResponses(
       Accept: "text/event-stream",
     },
     body: JSON.stringify(body),
+    signal,
   })
   if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => "")
-    throw new Error(`codex responses request failed: ${res.status} ${detail.slice(0, 500)}`)
+    throw new Error(`codex responses request failed: HTTP ${res.status}`)
   }
-  return parseImageGenerationResultFromSSE(res.body)
+  return parseImageGenerationResultFromSSE(res.body, signal)
 }
